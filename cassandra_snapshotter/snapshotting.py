@@ -16,7 +16,7 @@ from datetime import datetime
 from fabric.api import (env, execute, hide, run, sudo)
 from fabric.context_managers import settings
 from multiprocessing.dummy import Pool
-from cassandra_snapshotter.utils import decompression_pipe
+from .utils import decompression_pipe
 
 
 class Snapshot(object):
@@ -95,7 +95,8 @@ class Snapshot(object):
 
 
 class RestoreWorker(object):
-    def __init__(self, aws_access_key_id, aws_secret_access_key, snapshot, cassandra_bin_dir, cassandra_data_dir):
+    def __init__(self, aws_access_key_id, aws_secret_access_key, snapshot, cassandra_bin_dir, cassandra_data_dir,
+                 download_root_dir='/var/tmp'):
         self.aws_secret_access_key = aws_secret_access_key
         self.aws_access_key_id = aws_access_key_id
         self.s3connection = S3Connection(
@@ -105,10 +106,20 @@ class RestoreWorker(object):
         self.keyspace_table_matcher = None
         self.cassandra_bin_dir = cassandra_bin_dir
         self.cassandra_data_dir = cassandra_data_dir
+        self.download_root_dir = download_root_dir
 
+    # Restore via sstableloader into a running cassandra node
     def restore(self, keyspace, table, hosts, target_hosts):
-        # TODO:
-        # 4. sstableloader
+        """
+        Prerequisite:
+            - cassandra needs to be up and running with the keyspace and table
+        Steps done to restore:
+            - filter S3 data for <snapshot>, <hosts>, <keyspace> and <table>
+            - check the target nodes if the tables to be restored are available (i.e. schema created)
+            - crete all the directories in <download_root_dir>
+            - download filtered data from s3 into <download_root_dir> maintaining host/keyspace/table structure
+            - from each downloaded directory load the sstables with sstableloader to <target_hosts>
+        """
 
         logging.info("Restoring keyspace=%(keyspace)s,\
             table=%(table)s" % dict(keyspace=keyspace, table=table))
@@ -124,33 +135,55 @@ class RestoreWorker(object):
             hosts='|'.join(hosts), keyspace=keyspace, table=table)
         self.keyspace_table_matcher = re.compile(matcher_string)
 
-        keys = []
+        keys_to_directories = {}
         tables = set()
+        num_of_files = 0
+        total_size = 0
 
         for k in bucket.list(self.snapshot.base_path):
             r = self.keyspace_table_matcher.search(k.name)
             if not r:
                 continue
 
+            download_dir = "%(root_dir)s/%(base_path)s/%(host)s/%(keyspace)s/%(table)s" \
+                % dict(root_dir=self.download_root_dir, base_path=self.snapshot.base_path,
+                       host=r.group(1), keyspace=r.group(2), table=r.group(3))
+            keys_to_directories.setdefault(download_dir, [])
+            keys_to_directories[download_dir].append(k)
             tables.add(r.group(3))
-            keys.append(k)
-
-        keyspace_path = "/".join([self.cassandra_data_dir, "data", keyspace])
-        self._delete_old_dir_and_create_new(keyspace_path, tables)
-        total_size = reduce(lambda s, k: s + k.size, keys, 0)
+            num_of_files += 1
+            total_size += k.size
 
         logging.info("Found %(files_count)d files, with total size \
-            of %(size)s." % dict(files_count=len(keys),
-                                 size=self._human_size(total_size)))
-        print("Found %(files_count)d files, with total size \
-            of %(size)s." % dict(files_count=len(keys),
-                                 size=self._human_size(total_size)))
+            of %(size)s." % dict(files_count=num_of_files, size=self._human_size(total_size)))
 
-        self._download_keys(keys, total_size)
+        if self._check_missing_tables(target_hosts, keyspace, tables):
+            logging.error("Some of the nodes are missing tables that you wish to restore. Create schema and retry.")
+            return
 
-        logging.info("Finished downloading...")
+        self._download_keys(keys_to_directories, total_size)
 
-        self._run_sstableloader(keyspace_path, tables, target_hosts, self.cassandra_bin_dir)
+        restored = self._run_sstableloader(keys_to_directories.keys(), target_hosts, self.cassandra_bin_dir)
+        if restored:
+            logging.info("Successfully restored sstables. Removing downloaded file.")
+            for directory in keys_to_directories.keys():
+                shutil.rmtree(directory, ignore_errors=True)
+
+    def _check_missing_tables(self, target_hosts, keyspace, tables):
+        logging.info("Checking if all tables are available for restore.")
+        cqlsh = "%(cassandra_bin)s/cqlsh %(host)s -e '%(query)s'"
+        query_template = "SELECT * from %(keyspace)s.%(table)s limit 1;"
+        is_missing = False
+        for table in tables:
+            table = table.split('-')[0]
+            query = query_template % dict(keyspace=keyspace, table=table)
+            for host in target_hosts:
+                command = cqlsh % dict(host=host, cassandra_bin=self.cassandra_bin_dir, query=query)
+                logging.info("Running command: {!s}'".format(command))
+                if os.system(command) != 0:
+                    is_missing = True
+
+        return is_missing
 
     def _delete_old_dir_and_create_new(self, keyspace_path, tables):
 
@@ -164,7 +197,7 @@ class RestoreWorker(object):
             if not os.path.exists(path):
                 os.makedirs(path)
 
-    def _download_keys(self, keys, total_size, pool_size=5):
+    def _download_keys(self, keys_to_directories, total_size, pool_size=5):
         logging.info("Starting to download...")
 
         progress_string = ""
@@ -172,7 +205,16 @@ class RestoreWorker(object):
 
         thread_pool = Pool(pool_size)
 
-        for size in thread_pool.imap(self._download_key, keys):
+        items = []
+        for directory, keys in list(keys_to_directories.items()):
+            if not os.path.exists(directory):
+                logging.info("Creating directory {!s}".format(directory))
+                os.makedirs(directory)
+
+            for key in keys:
+                items.append((directory, key))
+
+        for size in thread_pool.imap(self._download_key, items):
             old_width = len(progress_string)
             read_bytes += size
             progress_string = "{!s} / {!s} ({:.2f})".format(
@@ -187,25 +229,31 @@ class RestoreWorker(object):
 
             sys.stderr.write(progress_string)
 
-    def _download_key(self, key):
-        r = self.keyspace_table_matcher.search(key.name)
-        filename = "./{!s}/{!s}/{!s}_{!s}".format(
-            r.group(2), r.group(3),
-            key.name.split('/')[2], key.name.split('/')[-1])
+        logging.info("Finished downloading...")
 
-        if filename.endswith('.lzo'):
-            filename = re.sub('\.lzo$', '', filename)
-            lzop_pipe = decompression_pipe(filename)
-            key.open_read()
-            for chunk in key:
-                lzop_pipe.stdin.write(chunk)
-            key.close()
-            out, err = lzop_pipe.communicate()
-            errcode = lzop_pipe.returncode
-            if errcode != 0:
-                logging.exception("lzop Out: %s\nError:%s\nExit Code %d: " % (out, err, errcode))
-        else:
-            key.get_contents_to_filename(filename)
+    def _download_key(self, item):
+        directory = item[0]
+        key = item[1]
+        filename = "{!s}/{!s}".format(directory, key.name.split('/')[-1])
+        decompressed_filename = re.sub('\.lzo$', '', filename) if filename.endswith('.lzo') else filename
+        needs_download = True
+        if os.path.exists(decompressed_filename):
+            logging.info("Skipping file {!s}".format(filename))
+            needs_download = False
+
+        if needs_download:
+            if filename.endswith('.lzo'):
+                lzop_pipe = decompression_pipe(decompressed_filename)
+                key.open_read()
+                for chunk in key:
+                    lzop_pipe.stdin.write(chunk)
+                key.close()
+                out, err = lzop_pipe.communicate()
+                errcode = lzop_pipe.returncode
+                if errcode != 0:
+                    logging.exception("lzop Out: %s\nError:%s\nExit Code %d: " % (out, err, errcode))
+            else:
+                key.get_contents_to_filename(filename)
 
         return key.size
 
@@ -216,17 +264,17 @@ class RestoreWorker(object):
             size /= 1024.0
         return "{:3.1f}{!s}".format(size, 'TB')
 
-    def _run_sstableloader(self, keyspace_path, tables, target_hosts, cassandra_bin_dir):
+    def _run_sstableloader(self, download_dirs, target_hosts, cassandra_bin_dir):
         sstableloader = "{!s}/sstableloader".format(cassandra_bin_dir)
-        for table in tables:
-            path = "/".join([keyspace_path, table])
-            if not os.path.exists(path):
-                os.makedirs(path)
+        success = True
+        for path in download_dirs:
             command = '%(sstableloader)s --nodes %(hosts)s -v \
-                %(keyspace_path)s/%(table)s' % dict(sstableloader=sstableloader, hosts=','.join(target_hosts),
-                                                    keyspace_path=keyspace_path, table=table)
+                %(sstable_path)s/' % dict(sstableloader=sstableloader, hosts=','.join(target_hosts), sstable_path=path)
             logging.info("invoking: {!s}".format(command))
-            os.system(command)
+            if os.system(command) != 0:
+                success = False
+
+        return success
 
 
 class BackupWorker(object):
