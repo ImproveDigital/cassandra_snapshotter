@@ -163,7 +163,11 @@ class RestoreWorker(object):
 
         self._download_keys(keys_to_directories, total_size)
 
-        self._run_sstableloader(keys_to_directories.keys(), target_hosts, self.cassandra_bin_dir)
+        restored = self._run_sstableloader(keys_to_directories.keys(), target_hosts, self.cassandra_bin_dir)
+        if restored:
+            logging.info("Successfully restored sstables. Removing downloaded file.")
+            for directory in keys_to_directories.keys():
+                shutil.rmtree(directory, ignore_errors=True)
 
     def _check_missing_tables(self, target_hosts, keyspace, tables):
         logging.info("Checking if all tables are available for restore.")
@@ -176,8 +180,7 @@ class RestoreWorker(object):
             for host in target_hosts:
                 command = cqlsh % dict(host=host, cassandra_bin=self.cassandra_bin_dir, query=query)
                 logging.info("Running command: {!s}'".format(command))
-                retval = os.system(command)
-                if retval != 0:
+                if os.system(command) != 0:
                     is_missing = True
 
         return is_missing
@@ -263,11 +266,15 @@ class RestoreWorker(object):
 
     def _run_sstableloader(self, download_dirs, target_hosts, cassandra_bin_dir):
         sstableloader = "{!s}/sstableloader".format(cassandra_bin_dir)
+        success = True
         for path in download_dirs:
             command = '%(sstableloader)s --nodes %(hosts)s -v \
                 %(sstable_path)s/' % dict(sstableloader=sstableloader, hosts=','.join(target_hosts), sstable_path=path)
             logging.info("invoking: {!s}".format(command))
-            os.system(command)
+            if os.system(command) != 0:
+                success = False
+
+        return success
 
 
 class BackupWorker(object):
