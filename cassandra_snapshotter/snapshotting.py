@@ -115,6 +115,7 @@ class RestoreWorker(object):
             - cassandra needs to be up and running with the keyspace and table
         Steps done to restore:
             - filter S3 data for <snapshot>, <hosts>, <keyspace> and <table>
+            - check the target nodes if the tables to be restored are available (i.e. schema created)
             - crete all the directories in <download_root_dir>
             - download filtered data from s3 into <download_root_dir> maintaining host/keyspace/table structure
             - from each downloaded directory load the sstables with sstableloader to <target_hosts>
@@ -135,6 +136,7 @@ class RestoreWorker(object):
         self.keyspace_table_matcher = re.compile(matcher_string)
 
         keys_to_directories = {}
+        tables = set()
         num_of_files = 0
         total_size = 0
 
@@ -148,17 +150,37 @@ class RestoreWorker(object):
                        host=r.group(1), keyspace=r.group(2), table=r.group(3))
             keys_to_directories.setdefault(download_dir, [])
             keys_to_directories[download_dir].append(k)
+            tables.add(r.group(3))
             num_of_files += 1
             total_size += k.size
 
         logging.info("Found %(files_count)d files, with total size \
             of %(size)s." % dict(files_count=num_of_files, size=self._human_size(total_size)))
 
+        if self._check_missing_tables(target_hosts, keyspace, tables):
+            logging.error("Some of the nodes are missing tables that you wish to restore. Create schema and retry.")
+            return
+
         self._download_keys(keys_to_directories, total_size)
 
-        logging.info("Finished downloading...")
-
         self._run_sstableloader(keys_to_directories.keys(), target_hosts, self.cassandra_bin_dir)
+
+    def _check_missing_tables(self, target_hosts, keyspace, tables):
+        logging.info("Checking if all tables are available for restore.")
+        cqlsh = "%(cassandra_bin)s/cqlsh %(host)s -e '%(query)s'"
+        query_template = "SELECT * from %(keyspace)s.%(table)s limit 1;"
+        is_missing = False
+        for table in tables:
+            table = table.split('-')[0]
+            query = query_template % dict(keyspace=keyspace, table=table)
+            for host in target_hosts:
+                command = cqlsh % dict(host=host, cassandra_bin=self.cassandra_bin_dir, query=query)
+                logging.info("Running command: {!s}'".format(command))
+                retval = os.system(command)
+                if retval != 0:
+                    is_missing = True
+
+        return is_missing
 
     def _delete_old_dir_and_create_new(self, keyspace_path, tables):
 
@@ -203,6 +225,8 @@ class RestoreWorker(object):
             progress_string = "{!s}{!s}\r".format(progress_string, padding)
 
             sys.stderr.write(progress_string)
+
+        logging.info("Finished downloading...")
 
     def _download_key(self, item):
         directory = item[0]
