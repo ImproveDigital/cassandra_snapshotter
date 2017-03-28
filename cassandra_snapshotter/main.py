@@ -123,7 +123,8 @@ def restore_backup(args):
                            aws_secret_access_key=args.aws_secret_access_key,
                            snapshot=snapshot,
                            cassandra_bin_dir=args.cassandra_bin_dir,
-                           cassandra_data_dir=args.cassandra_data_dir)
+                           cassandra_data_dir=args.cassandra_data_dir,
+                           download_root_dir=args.download_root_dir)
 
     if args.hosts:
         hosts = args.hosts.split(',')
@@ -289,6 +290,11 @@ def main():
         '--cassandra-data-dir',
         default='/usr/local/cassandra/data',
         help="cassandra data directory")
+
+    restore_parser.add_argument(
+        '--download-root-dir',
+        default='/var/tmp',
+        help="Root directory where S3 data is downloaded")
 
     args = base_parser.parse_args()
     subcommand = args.subcommand
