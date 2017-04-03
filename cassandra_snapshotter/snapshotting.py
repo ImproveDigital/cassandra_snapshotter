@@ -96,7 +96,7 @@ class Snapshot(object):
 
 class RestoreWorker(object):
     def __init__(self, aws_access_key_id, aws_secret_access_key, snapshot, cassandra_bin_dir, cassandra_data_dir,
-                 download_root_dir):
+                 download_root_dir, quiet):
         self.aws_secret_access_key = aws_secret_access_key
         self.aws_access_key_id = aws_access_key_id
         self.s3connection = S3Connection(
@@ -107,6 +107,7 @@ class RestoreWorker(object):
         self.cassandra_bin_dir = cassandra_bin_dir
         self.cassandra_data_dir = cassandra_data_dir
         self.download_root_dir = download_root_dir
+        self.quiet = quiet
 
     # Restore via sstableloader into a running cassandra node
     def restore(self, keyspace, table, hosts, target_hosts):
@@ -217,17 +218,18 @@ class RestoreWorker(object):
         for size in thread_pool.imap(self._download_key, items):
             old_width = len(progress_string)
             read_bytes += size
-            progress_string = "{!s} / {!s} ({:.2f})".format(
-                self._human_size(read_bytes),
-                self._human_size(total_size),
-                (read_bytes / float(total_size)) * 100.0)
-            width = len(progress_string)
-            padding = ""
-            if width < old_width:
-                padding = " " * (width - old_width)
-            progress_string = "{!s}{!s}\r".format(progress_string, padding)
+            if not self.quiet:
+                progress_string = "{!s} / {!s} ({:.2f})".format(
+                    self._human_size(read_bytes),
+                    self._human_size(total_size),
+                    (read_bytes / float(total_size)) * 100.0)
+                width = len(progress_string)
+                padding = ""
+                if width < old_width:
+                    padding = " " * (width - old_width)
+                progress_string = "{!s}{!s}\r".format(progress_string, padding)
 
-            sys.stderr.write(progress_string)
+                sys.stderr.write(progress_string)
 
         logging.info("Finished downloading...")
 
@@ -266,10 +268,12 @@ class RestoreWorker(object):
 
     def _run_sstableloader(self, download_dirs, target_hosts, cassandra_bin_dir):
         sstableloader = "{!s}/sstableloader".format(cassandra_bin_dir)
+        redirect = "> /dev/null" if self.quiet else ""
         success = True
         for path in download_dirs:
             command = '%(sstableloader)s --nodes %(hosts)s -v \
-                %(sstable_path)s/' % dict(sstableloader=sstableloader, hosts=','.join(target_hosts), sstable_path=path)
+                %(sstable_path)s/ %(redirect)s' % dict(sstableloader=sstableloader, hosts=','.join(target_hosts),
+                                                       sstable_path=path, redirect=redirect)
             logging.info("invoking: {!s}".format(command))
             if os.system(command) != 0:
                 success = False

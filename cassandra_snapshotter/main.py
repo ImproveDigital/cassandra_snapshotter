@@ -124,7 +124,8 @@ def restore_backup(args):
                            snapshot=snapshot,
                            cassandra_bin_dir=args.cassandra_bin_dir,
                            cassandra_data_dir=args.cassandra_data_dir,
-                           download_root_dir=args.download_root_dir)
+                           download_root_dir=args.download_root_dir,
+                           quiet=args.quiet)
 
     if args.hosts:
         hosts = args.hosts.split(',')
@@ -243,12 +244,6 @@ def main():
         '--rate-limit',
         default=0,
         help="Limit the upload speed to S3 (by using 'pv'). Value expressed in kilobytes (*1024)")
-
-    backup_parser.add_argument(
-        '--quiet',
-        action='store_true',
-        help="Set pv in quiet mode when using --rate-limit. "
-             "Useful when called by a script.")
 
     # restore snapshot arguments
     restore_parser = subparsers.add_parser(

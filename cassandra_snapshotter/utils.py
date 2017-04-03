@@ -32,6 +32,9 @@ base_parser.add_argument('-v', '--verbose',
                          action='store_true',
                          help='increase output verbosity')
 
+base_parser.add_argument('--quiet',
+                         action='store_true',
+                         help="Set quiet mode with backup or restore. Useful when called by a script.")
 
 def add_s3_arguments(arg_parser):
     """
