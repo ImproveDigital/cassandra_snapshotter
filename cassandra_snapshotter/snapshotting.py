@@ -277,7 +277,7 @@ class RestoreWorker(object):
         for path in download_dirs:
             table_loader_cmd = '%(sstableloader)s --nodes %(hosts)s -v %(sstable_path)s/ %(redirect)s'
             if self.cassandra_username:
-                table_loader_cmd = '%(sstableloader)s --username=%(username)s --password=%(password)s --nodes %(hosts)s -v \
+                table_loader_cmd = '%(sstableloader)s --username %(username)s --password %(password)s --nodes %(hosts)s -v \
                     %(sstable_path)s/ %(redirect)s'
 
             command = table_loader_cmd % dict(sstableloader=sstableloader, hosts=','.join(target_hosts),
