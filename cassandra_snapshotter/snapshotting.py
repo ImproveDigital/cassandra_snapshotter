@@ -174,7 +174,7 @@ class RestoreWorker(object):
         logging.info("Checking if all tables are available for restore.")
         cqlsh = "%(cassandra_bin)s/cqlsh %(host)s -e '%(query)s'"
         if self.cassandra_username:
-            cqlsh = "%(cassandra_bin)s/cqlsh --username=%(userame)s --password=%(password)s %(host)s -e '%(query)s'"
+            cqlsh = "%(cassandra_bin)s/cqlsh --username=%(username)s --password=%(password)s %(host)s -e '%(query)s'"
 
         query_template = "SELECT * from %(keyspace)s.%(table)s limit 1;"
         is_missing = False
