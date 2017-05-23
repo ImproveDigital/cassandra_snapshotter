@@ -122,10 +122,13 @@ def restore_backup(args):
     worker = RestoreWorker(aws_access_key_id=args.aws_access_key_id,
                            aws_secret_access_key=args.aws_secret_access_key,
                            snapshot=snapshot,
+                           cassandra_username=args.cassandra_username,
+                           cassandra_password=args.cassandra_password,
                            cassandra_bin_dir=args.cassandra_bin_dir,
                            cassandra_data_dir=args.cassandra_data_dir,
                            download_root_dir=args.download_root_dir,
-                           quiet=args.quiet)
+                           quiet=args.quiet,
+                           s3_connection_host=get_s3_connection_host(args.s3_bucket_region))
 
     if args.hosts:
         hosts = args.hosts.split(',')
@@ -290,6 +293,18 @@ def main():
         '--download-root-dir',
         default='/var/tmp',
         help="Root directory where S3 data is downloaded")
+
+    restore_parser.add_argument(
+        '--cassandra-username',
+        default='',
+        help="Cassandra user"
+    )
+
+    restore_parser.add_argument(
+        '--cassandra-password',
+        default='',
+        help="Cassandra user's password"
+    )
 
     args = base_parser.parse_args()
     subcommand = args.subcommand
