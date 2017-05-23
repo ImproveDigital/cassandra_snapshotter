@@ -95,15 +95,15 @@ class Snapshot(object):
 
 
 class RestoreWorker(object):
-    def __init__(self, aws_access_key_id, aws_secret_access_key, snapshot, cassandra_bin_dir, cassandra_data_dir,
-                 download_root_dir, quiet):
+    def __init__(self, aws_access_key_id, aws_secret_access_key, snapshot, cassandra_username, cassandra_password, cassandra_bin_dir, cassandra_data_dir,
+                 download_root_dir, s3_connection_host, quiet):
         self.aws_secret_access_key = aws_secret_access_key
         self.aws_access_key_id = aws_access_key_id
-        self.s3connection = S3Connection(
-            aws_access_key_id=self.aws_access_key_id,
-            aws_secret_access_key=self.aws_secret_access_key)
+        self.s3_connection_host = s3_connection_host
         self.snapshot = snapshot
         self.keyspace_table_matcher = None
+        self.cassandra_username = cassandra_username
+        self.cassandra_password = cassandra_password
         self.cassandra_bin_dir = cassandra_bin_dir
         self.cassandra_data_dir = cassandra_data_dir
         self.download_root_dir = download_root_dir
@@ -129,8 +129,8 @@ class RestoreWorker(object):
         if not table:
             table = ".*?"
 
-        bucket = self.s3connection.get_bucket(
-            self.snapshot.s3_bucket, validate=False)
+        conn = S3Connection(self.aws_access_key_id, self.aws_secret_access_key, host=self.s3_connection_host)
+        bucket = conn.get_bucket(self.snapshot.s3_bucket, validate=False)
 
         matcher_string = "(%(hosts)s).*/(%(keyspace)s)/(%(table)s-[A-Za-z0-9]*)/" % dict(
             hosts='|'.join(hosts), keyspace=keyspace, table=table)
@@ -173,13 +173,17 @@ class RestoreWorker(object):
     def _check_missing_tables(self, target_hosts, keyspace, tables):
         logging.info("Checking if all tables are available for restore.")
         cqlsh = "%(cassandra_bin)s/cqlsh %(host)s -e '%(query)s'"
+        if self.cassandra_username:
+            cqlsh = "%(cassandra_bin)s/cqlsh --username=%(username)s --password=%(password)s %(host)s -e '%(query)s'"
+
         query_template = "SELECT * from %(keyspace)s.%(table)s limit 1;"
         is_missing = False
         for table in tables:
             table = table.split('-')[0]
             query = query_template % dict(keyspace=keyspace, table=table)
             for host in target_hosts:
-                command = cqlsh % dict(host=host, cassandra_bin=self.cassandra_bin_dir, query=query)
+                command = cqlsh % dict(host=host, cassandra_bin=self.cassandra_bin_dir, query=query,
+                                       username=self.cassandra_username, password=self.cassandra_password)
                 logging.info("Running command: {!s}'".format(command))
                 if os.system(command) != 0:
                     is_missing = True
@@ -271,9 +275,15 @@ class RestoreWorker(object):
         redirect = "> /dev/null" if self.quiet else ""
         success = True
         for path in download_dirs:
-            command = '%(sstableloader)s --nodes %(hosts)s -v \
-                %(sstable_path)s/ %(redirect)s' % dict(sstableloader=sstableloader, hosts=','.join(target_hosts),
-                                                       sstable_path=path, redirect=redirect)
+            table_loader_cmd = '%(sstableloader)s --nodes %(hosts)s -v %(sstable_path)s/ %(redirect)s'
+            if self.cassandra_username:
+                table_loader_cmd = '%(sstableloader)s --username %(username)s --password %(password)s --nodes %(hosts)s -v \
+                    %(sstable_path)s/ %(redirect)s'
+
+            command = table_loader_cmd % dict(sstableloader=sstableloader, hosts=','.join(target_hosts),
+                                              sstable_path=path, redirect=redirect,
+                                              username=self.cassandra_username,
+                                              password=self.cassandra_password)
             logging.info("invoking: {!s}".format(command))
             if os.system(command) != 0:
                 success = False
