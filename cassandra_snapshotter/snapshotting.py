@@ -275,9 +275,15 @@ class RestoreWorker(object):
         redirect = "> /dev/null" if self.quiet else ""
         success = True
         for path in download_dirs:
-            command = '%(sstableloader)s --nodes %(hosts)s -v \
-                %(sstable_path)s/ %(redirect)s' % dict(sstableloader=sstableloader, hosts=','.join(target_hosts),
-                                                       sstable_path=path, redirect=redirect)
+            table_loader_cmd = '%(sstableloader)s --nodes %(hosts)s -v %(sstable_path)s/ %(redirect)s'
+            if self.cassandra_username:
+                table_loader_cmd = '%(sstableloader)s --username=%(username)s --password=%(password)s --nodes %(hosts)s -v \
+                    %(sstable_path)s/ %(redirect)s'
+
+            command = table_loader_cmd % dict(sstableloader=sstableloader, hosts=','.join(target_hosts),
+                                              sstable_path=path, redirect=redirect,
+                                              username=self.cassandra_username,
+                                              password=self.cassandra_password)
             logging.info("invoking: {!s}".format(command))
             if os.system(command) != 0:
                 success = False
